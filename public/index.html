@@ -399,7 +399,7 @@ td input,td select{min-width:110px}
 
         <div class="flex items-center justify-between"
           style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-          <h3 style="font-family:var(--font-display);font-size:1.15rem;margin:0;">Análise do mês selecionado no topo
+          <h3 style="font-family:var(--font-display);font-size:1.15rem;margin:0;">Análise Completa (Todas as Abas &amp; Investimentos)
           </h3>
           <button class="btn secondary small" id="btnGerarInsights">↻ Gerar / Regerar Insights</button>
         </div>
@@ -420,6 +420,14 @@ td input,td select{min-width:110px}
           <div class="card">
             <div class="label" style="color:var(--green);">🎯 Estratégia</div>
             <div class="value" style="font-size:.92rem;font-weight:400;line-height:1.5;" id="insight-4"></div>
+          </div>
+          <div class="card">
+            <div class="label" style="color:var(--gold);">📈 Carteira &amp; Rentabilidade</div>
+            <div class="value" style="font-size:.92rem;font-weight:400;line-height:1.5;" id="insight-5"></div>
+          </div>
+          <div class="card">
+            <div class="label" style="color:var(--green-dim);">💰 Alocação &amp; Próximos Aportes</div>
+            <div class="value" style="font-size:.92rem;font-weight:400;line-height:1.5;" id="insight-6"></div>
           </div>
         </div>
 
@@ -3155,12 +3163,16 @@ function loadState() {
       const arr = state.assetBalances[name] || [];
       const ultimoMes = getUltimoMesComDados();
       const isConsol = (state.currentMonth === 'consolidado' || state.currentMonth === null || state.currentMonth === undefined);
-      if (!isConsol) return Number(arr[state.currentMonth]) || 0;
-      // consolidado: usa o mês mais recente em que ESTE ativo tem saldo (importações de vários
-      // PDFs/meses não podem zerar ativos que não aparecem no último relatório)
-      for (let m = Math.min(11, Number(ultimoMes) || 11); m >= 0; m--) {
+      const mesLimite = isConsol ? Math.min(11, Number(ultimoMes) || 11) : Math.min(11, Number(state.currentMonth));
+      // Busca o mês mais recente até o limite em que ESTE ativo tem saldo lançado
+      for (let m = mesLimite; m >= 0; m--) {
         const v = Number(arr[m]);
-        if (v) return v;
+        if (!isNaN(v) && v > 0) return v;
+      }
+      // Fallback: se o mês selecionado for anterior ao primeiro lançamento do ativo, busca o último saldo disponível no ano
+      for (let m = 11; m >= 0; m--) {
+        const v = Number(arr[m]);
+        if (!isNaN(v) && v > 0) return v;
       }
       return 0;
     }
@@ -5292,96 +5304,293 @@ const valBRL = parseFloat((r.valor * (r.destino === 'despesa' ? cambioDespesa : 
       // Renda e despesa do período selecionado na interface
       const rend = state.incomes.filter(r => (m === 'consolidado' || monthOf(r.dia) === m) && (ano === 'consolidado' || yearOf(r.dia) === ano || !yearOf(r.dia)) && TIPOS_NO_TOTAL_RENDA.includes(r.tipo)).reduce((s, r) => s + Number(r.valor || 0), 0);
       const despTotal = getAllCategories().filter(c => findCategoryGroup(c) !== 'Investimentos').reduce((s, c) => s + realizadoDoCategoriaMes(c, m), 0);
-      const investMes = state.categoryGroups.find(g => g.nome === 'Investimentos').subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, m), 0);
+      const investGrupo = state.categoryGroups.find(g => g.nome === 'Investimentos') || { subs: [] };
+      const investMes = investGrupo.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, m), 0);
       const poupanca = rend - despTotal;
 
       // Métricas do último mês fechado com dados reais (ex: Agosto)
       const rendUltimo = state.incomes.filter(r => monthOf(r.dia) === ultimoMesFechado && (ano === 'consolidado' || yearOf(r.dia) === ano || !yearOf(r.dia)) && TIPOS_NO_TOTAL_RENDA.includes(r.tipo)).reduce((s, r) => s + Number(r.valor || 0), 0);
       const despUltimo = getAllCategories().filter(c => findCategoryGroup(c) !== 'Investimentos').reduce((s, c) => s + realizadoDoCategoriaMes(c, ultimoMesFechado), 0);
-      const investUltimo = state.categoryGroups.find(g => g.nome === 'Investimentos').subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, ultimoMesFechado), 0);
+      const investUltimo = investGrupo.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, ultimoMesFechado), 0);
       const poupancaUltimo = rendUltimo - despUltimo;
 
-      let patrimonio = 0;
+      // Acumulado do ano sempre calculado para contexto completo
+      const rendAno = state.incomes.filter(r => (ano === 'consolidado' || yearOf(r.dia) === ano || !yearOf(r.dia)) && TIPOS_NO_TOTAL_RENDA.includes(r.tipo)).reduce((s, r) => s + Number(r.valor || 0), 0);
+      const despAno = getAllCategories().filter(c => findCategoryGroup(c) !== 'Investimentos').reduce((s, c) => s + realizadoDoCategoriaMes(c, 'consolidado'), 0);
+      const investAno = investGrupo.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, 'consolidado'), 0);
+      const custoFixoAno = CUSTO_FIXO_SUBS.reduce((s, c) => s + realizadoDoCategoriaMes(c, 'consolidado'), 0);
+      const poupancaAno = rendAno - despAno;
+
+      // --- ABA ATIVOS (INVESTIMENTOS): Cálculo detalhado por classe e por ativo ---
+      let patrimonioAtivos = 0;
+      let totalAplicadoCarteira = 0;
+      let totalProventosCarteira = 0;
+      let sumAMxAplicadoGeral = 0;
+      let sumAAxAplicadoGeral = 0;
       const porTipoAtivo = {};
-      state.assetNames.forEach(name => {
-        const saldo = saldoMaisRecenteDoAtivo(name);
-        patrimonio += saldo;
+      const detalhesAtivos = [];
+      const vencimentosProximos = [];
+
+      (state.assetNames || []).forEach(name => {
+        ensureAssetRow(name);
         const meta = state.assetMeta?.[name] || {};
-        if (!meta.encerrado) {
-          const cat = meta.categoria || 'Outros';
-          porTipoAtivo[cat] = (porTipoAtivo[cat] || 0) + saldo;
+        if (meta.encerrado) return;
+
+        // Pega o saldo mais recente disponível do ativo (não zera se o mês do topo estiver sem importação)
+        const arr = state.assetBalances?.[name] || [];
+        let saldo = 0;
+        for (let idx = Math.min(11, ultimoMesFechado); idx >= 0; idx--) {
+          const v = Number(arr[idx]);
+          if (!isNaN(v) && v > 0) { saldo = v; break; }
+        }
+        if (saldo === 0) saldo = saldoMaisRecenteDoAtivo(name);
+
+        const aplicado = Number(meta.aplicado) || 0;
+        const qtd = Number(meta.qtd) || 0;
+        const calcDiv = getDividendosPorAtivo(name);
+        const proventosFixos = Number(meta.proventos) || 0;
+        const proventosTotais = proventosFixos + (calcDiv ? calcDiv.somaAno : 0);
+
+        let cat = meta.categoria || 'Outros';
+        if (cat === 'FIIs') cat = 'Fundos Imobiliários';
+        if (cat === 'Cripto') cat = 'Criptomoedas';
+        if (cat === 'Fundo de Investimento') cat = 'Fundos de Investimento';
+
+        let rentab = 0;
+        if (aplicado > 0) rentab = ((saldo + proventosTotais) - aplicado) / aplicado;
+
+        let am = 0, aa = 0;
+        if (aplicado > 0 && meta.dataApp) {
+          const dApp = new Date(meta.dataApp);
+          let mDiff = (hoje.getFullYear() - dApp.getFullYear()) * 12 + (hoje.getMonth() - dApp.getMonth());
+          if (mDiff <= 0) mDiff = 1;
+          am = Math.pow(1 + rentab, 1 / mDiff) - 1;
+          aa = Math.pow(1 + am, 12) - 1;
+        }
+
+        patrimonioAtivos += saldo;
+        totalAplicadoCarteira += aplicado;
+        totalProventosCarteira += proventosTotais;
+        sumAMxAplicadoGeral += (am * aplicado);
+        sumAAxAplicadoGeral += (aa * aplicado);
+
+        if (!porTipoAtivo[cat]) {
+          porTipoAtivo[cat] = { saldo: 0, aplicado: 0, proventos: 0, sumAMxAp: 0, sumAAxAp: 0, qtdAtivos: 0 };
+        }
+        porTipoAtivo[cat].saldo += saldo;
+        porTipoAtivo[cat].aplicado += aplicado;
+        porTipoAtivo[cat].proventos += proventosTotais;
+        porTipoAtivo[cat].sumAMxAp += (am * aplicado);
+        porTipoAtivo[cat].sumAAxAp += (aa * aplicado);
+        porTipoAtivo[cat].qtdAtivos += 1;
+
+        if (meta.venc) {
+          const dVenc = new Date(meta.venc + 'T00:00:00');
+          if (!isNaN(dVenc)) {
+            const diasAteVenc = Math.round((dVenc - hoje) / (1000 * 60 * 60 * 24));
+            if (diasAteVenc <= 180) {
+              vencimentosProximos.push(`${name} (${cat}, saldo ${fmtBRL(saldo)}, vence em ${fmtDateBR(meta.venc)} — ${diasAteVenc < 0 ? 'VENCIDO há ' + Math.abs(diasAteVenc) + ' dias' : 'faltam ' + diasAteVenc + ' dias'})`);
+            }
+          }
+        }
+
+        if (saldo > 0 || aplicado > 0) {
+          detalhesAtivos.push({
+            nome: name,
+            cat,
+            aplicado,
+            saldo,
+            proventos: proventosTotais,
+            proventosAno: calcDiv ? calcDiv.somaAno : 0,
+            rentabReais: (saldo + proventosTotais) - aplicado,
+            rentabPct: rentab,
+            am,
+            aa,
+            qtd,
+            dataApp: meta.dataApp || '',
+            venc: meta.venc || ''
+          });
         }
       });
 
-      const porGrupo = state.categoryGroups.filter(g => g.nome !== 'Investimentos').map(g => {
-        const total = g.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, m), 0);
-        return { nome: g.nome, total };
-      }).filter(g => g.total > 0).sort((a, b) => b.total - a.total);
+      const lucroGeralCarteira = (patrimonioAtivos + totalProventosCarteira) - totalAplicadoCarteira;
+      const rentabGeralCarteiraPct = totalAplicadoCarteira > 0 ? (lucroGeralCarteira / totalAplicadoCarteira) : 0;
+      const amGeralCarteira = totalAplicadoCarteira > 0 ? (sumAMxAplicadoGeral / totalAplicadoCarteira) : 0;
+      const aaGeralCarteira = totalAplicadoCarteira > 0 ? (sumAAxAplicadoGeral / totalAplicadoCarteira) : 0;
+
+      // Evolução mensal do patrimônio no ano (Jan até último mês fechado)
+      const evolucaoPatrimonioMes = [];
+      for (let idx = 0; idx <= Math.min(11, ultimoMesFechado); idx++) {
+        let somaMes = 0;
+        (state.assetNames || []).forEach(name => {
+          const v = Number((state.assetBalances?.[name] || [])[idx]);
+          if (!isNaN(v) && v > 0) somaMes += v;
+        });
+        if (somaMes > 0) evolucaoPatrimonioMes.push(`${MESES_ABREV[idx]}: ${fmtBRL(somaMes)}`);
+      }
+
+      // --- ABA BENS & DÍVIDAS ---
+      const bensImoveis = state.bens?.imoveis || [];
+      const bensVeiculos = state.bens?.veiculos || [];
+      const bensOutros = state.bens?.outros || [];
+      const dividasLista = state.bens?.dividas || [];
+      const somaBensCat = arr => arr.reduce((s, i) => s + ((Number(i.valor) || 0) - (Number(i.debito) || 0)), 0);
+      const totalBensLiquido = somaBensCat(bensImoveis) + somaBensCat(bensVeiculos) + somaBensCat(bensOutros);
+      const totalDividas = dividasLista.reduce((s, d) => s + (Number(d.saldoDevedor) || 0), 0);
+      const patrimonioLiquidoGlobal = patrimonioAtivos + totalBensLiquido - totalDividas;
+
+      // --- ABA RESUMO ANUAL (Grupos de Despesa e Fontes de Renda) ---
+      const porGrupoPeriodo = state.categoryGroups.filter(g => g.nome !== 'Investimentos').map(g => {
+        const totalPeriodo = g.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, m), 0);
+        const totalAnoG = g.subs.reduce((s, c) => s + realizadoDoCategoriaMes(c, 'consolidado'), 0);
+        return { nome: g.nome, totalPeriodo, totalAno: totalAnoG };
+      }).filter(g => g.totalPeriodo > 0 || g.totalAno > 0).sort((a, b) => b.totalPeriodo - a.totalPeriodo);
+
+      const rendaPorTipoAno = {};
+      (state.incomeTypes || []).forEach(t => { rendaPorTipoAno[t] = 0; });
+      (state.incomes || []).forEach(r => {
+        if (ano === 'consolidado' || yearOf(r.dia) === ano || !yearOf(r.dia)) {
+          rendaPorTipoAno[r.tipo] = (rendaPorTipoAno[r.tipo] || 0) + (Number(r.valor) || 0);
+        }
+      });
+
+      // --- ABA CARNÊ-LEÃO ---
+      let carneReceitaAno = 0, carneDedProfAno = 0, carneDedHabAno = 0, carneBaseAno = 0, carneImpostoAno = 0;
+      let carneReceitaUlt = 0, carneImpostoUlt = 0;
+      for (let idx = 0; idx < 12; idx++) {
+        const recM = (state.incomes || []).filter(r => r.tipo === 'Freelance' && monthOf(r.dia) === idx && (ano === 'consolidado' || yearOf(r.dia) === ano || !yearOf(r.dia))).reduce((s, r) => s + Number(r.valor || 0), 0);
+        const dedProfM = (state.carneLeaoDedutiveis || []).reduce((s, cat) => s + realizadoDoCategoriaMes(cat, idx), 0);
+        const dedHabM = ((state.carneLeaoDedutivelHab || []).reduce((s, cat) => s + realizadoDoCategoriaMes(cat, idx), 0)) * 0.20;
+        const dedAplicavel = Math.max(dedProfM + dedHabM, 564.80);
+        const baseM = Math.max(0, recM - dedAplicavel);
+        const impM = typeof calcCarneLeaoImposto === 'function' ? calcCarneLeaoImposto(baseM, recM) : 0;
+        carneReceitaAno += recM;
+        carneDedProfAno += dedProfM;
+        carneDedHabAno += dedHabM;
+        carneBaseAno += baseM;
+        carneImpostoAno += impM;
+        if (idx === ultimoMesFechado) {
+          carneReceitaUlt = recM;
+          carneImpostoUlt = impM;
+        }
+      }
 
       let txt = `[Data atual do calendário: ${hojeStr}]\n`;
       txt += `[ÚLTIMO MÊS FECHADO COM DADOS IMPORTADOS: ${MESES[ultimoMesFechado]}/${ano === 'consolidado' ? hoje.getFullYear() : ano}]\n`;
       txt += `AVISO OBRIGATÓRIO: O mês do calendário atual (${MESES[mesCalendario]}) ainda NÃO foi importado e está sem lançamentos. NUNCA diga que o saldo é zero, que o patrimônio caiu para zero ou que não houve renda em ${MESES[mesCalendario]}. A situação patrimonial real mais recente e o saldo de carteira correspondem integralmente ao fechamento de ${MESES[ultimoMesFechado]}.\n\n`;
 
       if (m === 'consolidado' && ano === 'consolidado') {
-        txt += `Período analisado: Histórico Completo\n`;
+        txt += `Período selecionado no topo: Histórico Completo\n`;
       } else if (m === 'consolidado') {
-        txt += `Período analisado: Acumulado do Ano de ${ano} (até o fechamento de ${MESES[ultimoMesFechado]})\n`;
+        txt += `Período selecionado no topo: Consolidado do Ano de ${ano} (até o fechamento de ${MESES[ultimoMesFechado]})\n`;
       } else {
-        txt += `Período analisado: ${MESES[m]}/${ano === 'consolidado' ? 'Todos os Anos' : ano}\n`;
+        txt += `Período selecionado no topo: ${MESES[m]}/${ano === 'consolidado' ? 'Todos os Anos' : ano}\n`;
         if (m > ultimoMesFechado) {
           txt += `(Atenção: O mês de ${MESES[m]} ainda não foi importado. Os últimos dados reais fechados são os de ${MESES[ultimoMesFechado]}).\n`;
         }
       }
 
-      txt += `\n--- POSIÇÃO PATRIMONIAL ATUAL (Fechamento de ${MESES[ultimoMesFechado]}) ---\n`;
-      txt += `Patrimônio Líquido/Total de Ativos: ${fmtBRL(patrimonio)}\n`;
-      txt += `Composição da Carteira Atual:\n`;
-      Object.keys(porTipoAtivo).sort((a, b) => porTipoAtivo[b] - porTipoAtivo[a]).forEach(cat => {
-        txt += `- ${cat}: ${fmtBRL(porTipoAtivo[cat])}\n`;
+      txt += `\n=== 1. DASHBOARD & FLUXO DE CAIXA (MÊS SELECIONADO, ÚLTIMO MÊS FECHADO E ANO) ===\n`;
+      if (m !== 'consolidado') {
+        txt += `[Mês Selecionado: ${MESES[m]}] Rendimentos: ${fmtBRL(rend)} | Despesas: ${fmtBRL(despTotal)} | Aportes em Investimentos: ${fmtBRL(investMes)} | Capacidade de Poupança: ${fmtBRL(poupanca)}\n`;
+      }
+      txt += `[Último Mês Fechado: ${MESES[ultimoMesFechado]}] Rendimentos: ${fmtBRL(rendUltimo)} | Despesas: ${fmtBRL(despUltimo)} | Aportes em Investimentos: ${fmtBRL(investUltimo)} | Capacidade de Poupança: ${fmtBRL(poupancaUltimo)}\n`;
+      txt += `[Acumulado do Ano até ${MESES[ultimoMesFechado]}] Rendimentos: ${fmtBRL(rendAno)} | Despesas: ${fmtBRL(despAno)} (Custo Fixo: ${fmtBRL(custoFixoAno)}, Custo Variável: ${fmtBRL(despAno - custoFixoAno)}) | Total Aportado no Ano: ${fmtBRL(investAno)} | Poupança Acumulada: ${fmtBRL(poupancaAno)}\n`;
+
+      const expertEl = document.getElementById('dashExpertAnalysisWrap');
+      if (expertEl && expertEl.innerText.trim()) {
+        txt += `Médias Mensais (Análise de Performance): ` + expertEl.innerText.replace(/Análise de Performance Mensal \(Médias\).*\n/g, '').replace(/\n+/g, ' | ').trim() + '\n';
+      }
+
+      txt += `\n=== 2. ABA RESUMO ANUAL & ORÇAMENTO (DESPESAS E FONTES DE RENDA) ===\n`;
+      txt += `Despesas por Grupo (Período Selecionado | Acumulado no Ano | % do Total Anual):\n`;
+      porGrupoPeriodo.forEach(g => {
+        const pctAno = despAno > 0 ? ((g.totalAno / despAno) * 100).toFixed(1) + '%' : '0%';
+        txt += `- ${g.nome}: Período ${fmtBRL(g.totalPeriodo)} | Ano ${fmtBRL(g.totalAno)} (${pctAno})\n`;
+      });
+      txt += `De Onde Vem a Renda no Ano:\n`;
+      Object.keys(rendaPorTipoAno).filter(t => rendaPorTipoAno[t] > 0).sort((a, b) => rendaPorTipoAno[b] - rendaPorTipoAno[a]).forEach(t => {
+        txt += `- ${t}: ${fmtBRL(rendaPorTipoAno[t])}${!TIPOS_NO_TOTAL_RENDA.includes(t) ? ' (movimentação patrimonial/retirada, fora do total de renda)' : ''}\n`;
+      });
+      txt += `ATENÇÃO (Contexto do usuário): Gastos no grupo "Bancos / Taxas" ou "Impostos" são obrigações legais (como imposto por recebimento de freelance) e não configuram falta de controle financeiro. Não sugira "cortar" impostos.\n`;
+
+      txt += `\n=== 3. ABA ATIVOS / INVESTIMENTOS (CARTEIRA, RENTABILIDADE E PROVENTOS) ===\n`;
+      txt += `- Saldo Atual Total em Ativos Financeiros: ${fmtBRL(patrimonioAtivos)}\n`;
+      txt += `- Valor Total Aplicado (Custo de Aquisição): ${fmtBRL(totalAplicadoCarteira)}\n`;
+      txt += `- Proventos/Dividendos Acumulados na Carteira: ${fmtBRL(totalProventosCarteira)} (sendo ${fmtBRL(rendaPorTipoAno['Proventos'] || 0)} recebidos no ano atual)\n`;
+      txt += `- Resultado / Lucro Acumulado (Saldo + Proventos − Aplicado): ${fmtBRL(lucroGeralCarteira)} (${formatPercentBR(rentabGeralCarteiraPct, 2)})\n`;
+      txt += `- Rentabilidade Média Ponderada da Carteira: ${formatPercentBR(amGeralCarteira, 2)} a.m. | ${formatPercentBR(aaGeralCarteira, 2)} a.a.\n`;
+      if (evolucaoPatrimonioMes.length > 0) {
+        txt += `- Evolução Mensal do Patrimônio no Ano: ${evolucaoPatrimonioMes.join(' -> ')}\n`;
+      }
+
+      txt += `\nAlocação e Desempenho por Classe de Ativo:\n`;
+      const histAnos = state.histAnos || {};
+      Object.keys(porTipoAtivo).sort((a, b) => porTipoAtivo[b].saldo - porTipoAtivo[a].saldo).forEach(cat => {
+        const info = porTipoAtivo[cat];
+        const pctCarteira = patrimonioAtivos > 0 ? (info.saldo / patrimonioAtivos) : 0;
+        const lucroCat = (info.saldo + info.proventos) - info.aplicado;
+        const rentCatPct = info.aplicado > 0 ? (lucroCat / info.aplicado) : 0;
+        const amCat = info.aplicado > 0 ? (info.sumAMxAp / info.aplicado) : 0;
+        const aaCat = info.aplicado > 0 ? (info.sumAAxAp / info.aplicado) : 0;
+        const h24 = histAnos[cat]?.['2024'];
+        const h25 = histAnos[cat]?.['2025'];
+        const histTxt = (h24?.aa || h25?.aa) ? ` [Histórico: ${h24?.aa ? '2024=' + formatPercentBR(h24.aa, 1) + ' AA ' : ''}${h25?.aa ? '2025=' + formatPercentBR(h25.aa, 1) + ' AA' : ''}]` : '';
+        txt += `- ${cat} (${info.qtdAtivos} ativo(s), ${formatPercentBR(pctCarteira, 1)} da carteira): Saldo ${fmtBRL(info.saldo)} | Aplicado ${fmtBRL(info.aplicado)} | Proventos ${fmtBRL(info.proventos)} | Lucro ${fmtBRL(lucroCat)} (${formatPercentBR(rentCatPct, 2)}) | Média ${formatPercentBR(amCat, 2)} a.m. (${formatPercentBR(aaCat, 2)} a.a.)${histTxt}\n`;
       });
 
-      txt += `\n--- ÚLTIMO MÊS FECHADO (${MESES[ultimoMesFechado].toUpperCase()}) ---\n`;
-      txt += `Rendimentos em ${MESES[ultimoMesFechado]}: ${fmtBRL(rendUltimo)}\n`;
-      txt += `Despesas em ${MESES[ultimoMesFechado]}: ${fmtBRL(despUltimo)}\n`;
-      txt += `Investimentos em ${MESES[ultimoMesFechado]}: ${fmtBRL(investUltimo)}\n`;
-      txt += `Capacidade de Poupança em ${MESES[ultimoMesFechado]}: ${fmtBRL(poupancaUltimo)}\n`;
-
-      if (m === 'consolidado') {
-        txt += `\n--- ACUMULADO DO ANO (Jan a ${MESES[ultimoMesFechado]}) ---\n`;
-        txt += `Rendimentos Acumulados: ${fmtBRL(rend)}\n`;
-        txt += `Despesas Acumuladas: ${fmtBRL(despTotal)}\n`;
-        txt += `Total Investido no Ano: ${fmtBRL(investMes)}\n`;
-        txt += `Poupança Acumulada no Ano: ${fmtBRL(poupanca)}\n`;
+      if (vencimentosProximos.length > 0) {
+        txt += `\nAlerta de Vencimentos de Títulos (próximos 180 dias ou vencidos):\n`;
+        vencimentosProximos.forEach(v => { txt += `- ${v}\n`; });
       }
 
-      txt += `\nGastos por grupo de categoria no período analisado:\n`;
-      porGrupo.slice(0, 6).forEach(g => txt += `- ${g.nome}: ${fmtBRL(g.total)}\n`);
+      txt += `\nDetalhamento Individual dos Ativos em Carteira (ordenados por saldo):\n`;
+      detalhesAtivos.sort((a, b) => b.saldo - a.saldo).forEach(a => {
+        txt += `- ${a.nome} [${a.cat}]: Saldo ${fmtBRL(a.saldo)} | Aplicado ${fmtBRL(a.aplicado)} | Rentab. ${formatPercentBR(a.rentabPct, 2)} (${fmtBRL(a.rentabReais)}) | ${formatPercentBR(a.am, 2)} a.m.${a.proventos > 0 ? ' | Proventos ' + fmtBRL(a.proventos) : ''}${a.dataApp ? ' | Aplic. ' + fmtDateBR(a.dataApp) : ''}${a.venc ? ' | Venc. ' + fmtDateBR(a.venc) : ''}\n`;
+      });
 
-      txt += `\nATENÇÃO (Contexto do usuário): Gastos no grupo "Bancos / Taxas" ou "Impostos" são obrigações legais (como imposto por recebimento de freelance) e não configuram falta de controle financeiro. Não sugira "cortar" impostos.\n`;
-
-      
-const expertEl = document.getElementById('dashExpertAnalysisWrap');
-if (expertEl && expertEl.innerText.trim()) {
-  txt += `\n--- ANÁLISE EXPERT (MÉDIAS MENSAIS DO ANO) ---\n`;
-  txt += expertEl.innerText.replace(/Análise de Performance Mensal \(Médias\).*\n/g, '').replace(/\n\s*\n/g, '\n').trim() + '\n';
-}
-
-const metaImovel = state.metaImovel;
-      if (metaImovel && metaImovel.valor > 0) {
-        const itbi = (metaImovel.valor * (Number(metaImovel.itbiAliquota || 3) / 100));
-        const regDesc = metaImovel.isPrimeiroImovel ? 0.5 : 1.0;
-        const reg = (metaImovel.valor * (Number(metaImovel.registroAliquota || 1.5) / 100)) * regDesc;
-        const totCustos = itbi + reg + (Number(metaImovel.outrosCustos) || 0);
-        txt += `Meta de imóvel: valor ${fmtBRL(metaImovel.valor)}, ITBI estimado ${fmtBRL(itbi)}, Registro/Cartório ${fmtBRL(reg)}, Custos totais ${fmtBRL(totCustos)} (1º Imóvel: ${metaImovel.isPrimeiroImovel ? 'Sim' : 'Não'}, Financiar custos: ${metaImovel.financiarCustos ? 'Sim' : 'Não'}), veja detalhes na aba "Meta: Imóvel".\n`;
+      txt += `\n=== 4. ABA BENS & DÍVIDAS E PATRIMÔNIO LÍQUIDO GLOBAL ===\n`;
+      txt += `- Patrimônio Líquido Global (Ativos Financeiros + Bens Líquidos − Dívidas): ${fmtBRL(patrimonioLiquidoGlobal)}\n`;
+      txt += `  * Ativos Financeiros: ${fmtBRL(patrimonioAtivos)}\n`;
+      txt += `  * Bens Físicos/Direitos (Líquido): ${fmtBRL(totalBensLiquido)}\n`;
+      txt += `  * Dívidas Totais: ${fmtBRL(totalDividas)}\n`;
+      [['Imóveis', bensImoveis], ['Veículos', bensVeiculos], ['Outros Bens (FGTS, etc.)', bensOutros]].forEach(([label, lista]) => {
+        if (lista.length > 0) {
+          txt += `- ${label}: ` + lista.map(i => `${i.nome}: Valor ${fmtBRL(i.valor)}${Number(i.debito) > 0 ? ' (Débito ' + fmtBRL(i.debito) + ', Líquido ' + fmtBRL((Number(i.valor) || 0) - (Number(i.debito) || 0)) + ')' : ''}`).join(' | ') + '\n';
+        }
+      });
+      if (dividasLista.length > 0) {
+        txt += `- Dívidas Cadastradas: ` + dividasLista.map(d => `${d.nome} (${d.credor || 'sem credor'}): Saldo Devedor ${fmtBRL(d.saldoDevedor)}, Juros ${d.jurosAnual || 0}% a.a., ${d.parcelasRestantes || 0} parcelas de ${fmtBRL(d.parcelaValor)}`).join(' | ') + '\n';
+      } else {
+        txt += `- Dívidas Cadastradas: Nenhuma dívida em aberto.\n`;
       }
-      
-      // INJEÇÃO COMPLETA DE DADOS (ACESSO A TODAS AS ABAS PARA A IA)
+
+      txt += `\n=== 5. ABA META: IMÓVEL (PLANEJAMENTO E SIMULAÇÃO) ===\n`;
+      if (typeof buildContextoImovel === 'function' && state.metaImovel && state.metaImovel.valor > 0) {
+        txt += buildContextoImovel();
+      } else if (state.metaImovel && state.metaImovel.valor > 0) {
+        txt += `Meta de imóvel: valor ${fmtBRL(state.metaImovel.valor)}.\n`;
+      }
+
+      txt += `\n=== 6. ABA CARNÊ-LEÃO (AUTÔNOMO / FREELANCE E IMPOSTO DARF 0190) ===\n`;
+      if (carneReceitaAno > 0 || carneDedProfAno > 0) {
+        const aliqEfetiva = carneReceitaAno > 0 ? (carneImpostoAno / carneReceitaAno) : 0;
+        txt += `- Receita Freelance Bruta no Ano: ${fmtBRL(carneReceitaAno)} (Último mês fechado ${MESES[ultimoMesFechado]}: ${fmtBRL(carneReceitaUlt)})\n`;
+        txt += `- Deduções Livro-Caixa no Ano: Profissionais (100%) = ${fmtBRL(carneDedProfAno)} | Home Office Habitação (20%) = ${fmtBRL(carneDedHabAno)}\n`;
+        txt += `- Base de Cálculo Acumulada no Ano: ${fmtBRL(carneBaseAno)}\n`;
+        txt += `- Imposto Carnê-Leão Estimado no Ano (DARF 0190): ${fmtBRL(carneImpostoAno)} (Alíquota efetiva sobre receita bruta: ${formatPercentBR(aliqEfetiva, 1)} | Último mês fechado: ${fmtBRL(carneImpostoUlt)})\n`;
+      } else {
+        txt += `- Sem receitas de Freelance tributáveis lançadas no período.\n`;
+      }
+
+      // INJEÇÃO COMPLETA DE DADOS (ACESSO GRANULAR A TODAS AS ABAS PARA A IA)
       txt += `\n--- BANCO DE DADOS COMPLETO (TODAS AS ABAS) ---\n`;
-      txt += `Se o usuário fizer qualquer pergunta específica sobre gastos, ganhos, meses passados ou evolução, consulte estas listas:\n`;
+      txt += `Se o usuário fizer qualquer pergunta específica sobre gastos, ganhos, ativos, meses passados ou evolução, consulte estas listas:\n`;
       try {
         txt += `Despesas detalhadas: ${JSON.stringify(state.expenses.map(e => ({ d: e.dia, v: e.valor, c: e.categoria, desc: e.descricao })))}\n`;
         txt += `Recebimentos detalhados: ${JSON.stringify(state.incomes.map(i => ({ d: i.dia, v: i.valor, t: i.tipo, desc: i.descricao })))}\n`;
-        txt += `Ativos Financeiros (Saldos): ${JSON.stringify(state.assetBalances)}\n`;
+        txt += `Ativos Financeiros (Saldos Mensais): ${JSON.stringify(state.assetBalances)}\n`;
+        txt += `Ativos Financeiros (Metadados/Aplicado/Vencimento): ${JSON.stringify(state.assetMeta)}\n`;
         txt += `Bens Físicos e Dívidas: ${JSON.stringify(state.bens)}\n`;
       } catch(e) {
         // Fallback silently if JSON fails
@@ -5564,21 +5773,45 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido, onde as chaves são os 'id' das t
       h = h.replace(/\n/g, '<br>').replace(/<\/div><br>/g, '</div>');
       return h;
     }
+    const INSIGHTS_COUNT = 6;
+    try {
+      const savedInsights = JSON.parse(localStorage.getItem('cf_lastInsights') || 'null');
+      if (Array.isArray(savedInsights) && savedInsights.length > 0) {
+        for (let i = 0; i < Math.min(INSIGHTS_COUNT, savedInsights.length); i++) {
+          const el = document.getElementById('insight-' + (i + 1));
+          if (el && savedInsights[i]) el.innerHTML = mdBasicoParaHtml(savedInsights[i]);
+        }
+      }
+    } catch (e) {}
+
     document.getElementById('btnGerarInsights').addEventListener('click', async () => {
-      for (let i = 1; i <= 4; i++) document.getElementById('insight-' + i).innerHTML = '<span class="skeleton" style="display:block;height:12px;margin-bottom:6px;background:var(--surface3);border-radius:4px;"></span>';
+      for (let i = 1; i <= INSIGHTS_COUNT; i++) {
+        const el = document.getElementById('insight-' + i);
+        if (el) el.innerHTML = '<span class="skeleton" style="display:block;height:12px;margin-bottom:6px;background:var(--surface3);border-radius:4px;"></span>';
+      }
       const contexto = buildContextoFinanceiro();
-      const prompt = `Você é um assessor financeiro pessoal, direto e prático, respondendo em português do Brasil. Aqui estão os dados reais do usuário:\n\n${contexto}\n\nEscreva exatamente 4 parágrafos curtos (2-3 frases cada, sem enrolação), separados pelo delimitador "|||", nesta ordem: 1) Visão Geral da saúde financeira (baseada no último mês fechado e acumulado); 2) Alerta de Risco (o ponto mais preocupante, se houver); 3) Oportunidade (onde dá pra economizar ou otimizar); 4) Estratégia prática para o futuro próximo. Considere estritamente que o último mês fechado com dados é o mês de referência informado no contexto, e que meses futuros ou em andamento sem dados ainda não foram importados (NUNCA afirme que o saldo zerou hoje ou que não houve renda no mês em andamento). Não use markdown de título, só texto corrido, pode usar **negrito** pra destacar números importantes.`;
+      const prompt = `Você é um assessor financeiro e especialista em investimentos pessoal, direto e prático, respondendo em português do Brasil. Aqui estão os dados reais do usuário consolidados de todas as abas (Dashboard, Resumo Anual, Despesas, Recebimentos, Ativos/Investimentos, Bens & Dívidas, Meta: Imóvel e Carnê-Leão):\n\n${contexto}\n\nEscreva exatamente 6 parágrafos curtos (2-4 frases cada, sem enrolação e citando números reais do usuário), separados pelo delimitador "|||", exatamente nesta ordem:\n1) Visão Geral: Saúde financeira global integrando fluxo de caixa, taxa de poupança e patrimônio líquido total (Ativos + Bens − Dívidas), com base no último mês fechado e acumulado do ano;\n2) Alerta de Risco: Ponto de atenção mais relevante nas despesas, comprometimento de renda, dívidas, impostos/Carnê-Leão, Meta: Imóvel ou concentração/vencimentos de ativos;\n3) Oportunidade: Onde otimizar gastos variáveis, aproveitar deduções legais (Carnê-Leão) ou elevar a capacidade de poupança mensal;\n4) Estratégia: Plano de ação prático conectando orçamento mensal, reserva/fluxo de caixa e objetivos patrimoniais (como a Meta: Imóvel);\n5) Carteira & Rentabilidade (Investimentos): Análise do desempenho dos investimentos na aba Ativos (rentabilidade acumulada em R$ e %, média % a.m. / % a.a., proventos/dividendos recebidos, destaques positivos/negativos e eventuais vencimentos de títulos);\n6) Alocação & Próximos Aportes (Investimentos): Avaliação da diversificação por classe de ativo (Renda Fixa, Tesouro Direto, Fundos, FIIs, Ações, Cripto, etc.) e recomendação prática de onde direcionar os próximos aportes ou rebalancear a carteira.\n\nConsidere estritamente que o último mês fechado com dados é o mês de referência informado no contexto, e que meses futuros ou em andamento sem dados ainda não foram importados (NUNCA afirme que o saldo zerou hoje ou que não houve renda no mês em andamento). Não coloque títulos como "1) Visão Geral:" no início de cada bloco, escreva apenas o texto corrido de cada caixa, usando **negrito** para destacar números e ativos importantes.`;
       try {
         const texto = await chamarGemini(prompt);
         const partes = texto.split('|||').map(s => s.trim()).filter(Boolean);
-        if (partes.length >= 4) {
-          for (let i = 0; i < 4; i++) document.getElementById('insight-' + (i + 1)).innerHTML = mdBasicoParaHtml(partes[i]);
+        if (partes.length >= 2) {
+          for (let i = 0; i < INSIGHTS_COUNT; i++) {
+            const el = document.getElementById('insight-' + (i + 1));
+            if (el) el.innerHTML = partes[i] ? mdBasicoParaHtml(partes[i]) : '';
+          }
+          try { localStorage.setItem('cf_lastInsights', JSON.stringify(partes.slice(0, INSIGHTS_COUNT))); } catch (e) {}
         } else {
           document.getElementById('insight-1').innerHTML = mdBasicoParaHtml(texto);
-          for (let i = 2; i <= 4; i++) document.getElementById('insight-' + i).textContent = '';
+          for (let i = 2; i <= INSIGHTS_COUNT; i++) {
+            const el = document.getElementById('insight-' + i);
+            if (el) el.textContent = '';
+          }
         }
       } catch (e) {
-        for (let i = 1; i <= 4; i++) document.getElementById('insight-' + i).textContent = '';
+        for (let i = 1; i <= INSIGHTS_COUNT; i++) {
+          const el = document.getElementById('insight-' + i);
+          if (el) el.textContent = '';
+        }
         document.getElementById('insight-1').innerHTML = `<span class="neg">${escapeHtml(e.message)}</span>`;
         toast('Erro ao gerar insights: ' + e.message, true);
       }
